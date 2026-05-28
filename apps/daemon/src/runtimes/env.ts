@@ -1,4 +1,8 @@
+import path from 'node:path';
+
 import { expandConfiguredEnv } from './paths.js';
+import { resolveAmrOpenCodeExecutable } from './executables.js';
+import { amrVelaProfileEnv } from '../integrations/vela-profile.js';
 
 type RuntimeEnvMap = NodeJS.ProcessEnv | Record<string, string>;
 
@@ -37,6 +41,21 @@ export function spawnEnvForAgent(
     ...baseEnv,
     ...expandConfiguredEnv(configuredEnv),
   };
+  if (agentId === 'amr') {
+    Object.assign(env, amrVelaProfileEnv(env));
+    if (!env.OPENCODE_TEST_HOME?.trim() && env.OD_DATA_DIR?.trim()) {
+      env.OPENCODE_TEST_HOME = path.join(
+        env.OD_DATA_DIR.trim(),
+        'amr',
+        'opencode-home',
+      );
+    }
+    if (!env.VELA_OPENCODE_BIN?.trim()) {
+      const opencodeBin = resolveAmrOpenCodeExecutable(env);
+      if (opencodeBin) env.VELA_OPENCODE_BIN = opencodeBin;
+    }
+    return env;
+  }
   if (agentId === 'claude') {
     stripUnlessCustomBaseUrl(env, 'ANTHROPIC_BASE_URL', ['ANTHROPIC_API_KEY']);
     return env;
