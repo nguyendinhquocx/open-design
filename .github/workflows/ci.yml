@@ -64,7 +64,6 @@ jobs:
       # If postinstall grows a targeted app type-generation phase covering these
       # three exports without broad app builds, this CI prebuild can be removed.
       - name: Prebuild workspace type declarations
-        if: ${{ needs.scopes.outputs.run_preflight_typecheck == 'true' }}
         run: |
           pnpm --filter @open-design/daemon build
           pnpm --filter @open-design/desktop build
