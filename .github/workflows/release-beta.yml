@@ -98,13 +98,6 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Bake the AMR profile (tools-pack reads OPEN_DESIGN_AMR_PROFILE) so a
-          # feature-test dispatch produces a packaged app that targets that
-          # profile's AMR backend and enables the workspace-team transport. The
-          # matching console origin arrives via the workflow-level
-          # OD_VELA_WEB_URL. Empty = default (prod) — the normal beta pipeline is
-          # unaffected.
-          OPEN_DESIGN_AMR_PROFILE: ${{ inputs.amr_profile }}
         run: |
           set -euo pipefail
           signed_flag=""
