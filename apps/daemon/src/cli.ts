@@ -697,6 +697,8 @@ function printRootHelp() {
 
   od tools design-systems read --path <manifest-declared-path>
       Read active design-system pull-layer files through daemon wrapper commands.
+  od tools design-systems resolve --intent <canonical-intent>
+      Resolve an active DS 3.0 intent to its component, variant, properties, and states.
 
   od mcp live-artifacts
       Start the MCP server exposing live-artifact and connector tools.
@@ -789,6 +791,7 @@ async function runAmr(args) {
   if (!sub || sub === 'help' || args.includes('--help') || args.includes('-h')) {
     console.log(`Usage:
   od amr login [--json]
+  od amr logout [--json]
   od amr status [--refresh] [--json]
 
 Options:
@@ -801,6 +804,20 @@ Options:
   const flags = parseFlags(rest, { string: AMR_STRING_FLAGS, boolean: AMR_BOOLEAN_FLAGS });
   const base = await cliDaemonBaseUrl(flags);
   switch (sub) {
+    case 'logout': {
+      const logoutResp = await fetch(`${base}/api/integrations/vela/logout`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      if (!logoutResp.ok) return structuredHttpFailure(logoutResp);
+      const result = await logoutResp.json();
+      if (flags.json) {
+        return process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+      }
+      console.log('AMR account\tsigned out');
+      return;
+    }
     case 'login': {
       const loginResp = await fetch(`${base}/api/integrations/vela/login`, {
         method: 'POST',
