@@ -547,6 +547,12 @@ export interface Dict {
   'settings.getStarted': string;
   'settings.envConfigure': string;
   'settings.localCli': string;
+  'settings.dshSetupTitle': string;
+  'settings.dshSetupDescription': string;
+  'settings.dshSetupNote': string;
+  'settings.dshSetupConfirm': string;
+  'settings.dshSetupInstalling': string;
+  'settings.dshSetupRequired': string;
   'settings.anthropicApi': string;
   'settings.noAgentSelected': string;
   'settings.language': string;
@@ -4333,6 +4339,7 @@ export interface Dict {
   'assistant.role': string;
   'assistant.workingLabel': string;
   'assistant.doneLabel': string;
+  'assistant.canceledLabel': string;
   'assistant.copyMarkdown': string;
   'assistant.forkConversation': string;
   'assistant.forkingConversation': string;

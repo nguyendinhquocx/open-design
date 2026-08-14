@@ -103,6 +103,17 @@ describe("pricing contract", () => {
     assert.match(campaign, /body: 'DeepSeek V4 Pro 与 V4 Flash · 两周免费用'/);
     assert.match(campaign, /body: 'DeepSeek V4 Pro and V4 Flash · FREE for two weeks'/);
     assert.match(campaign, /body: 'DeepSeek V4 Pro 與 V4 Flash · 兩週免費用'/);
+    for (const locale of ['en', 'zh', 'zh-tw', 'ja', 'ko', 'de', 'fr', 'ru', 'es', 'pt-br', 'it', 'tr']) {
+      const key = locale.includes('-') ? `'${locale}'` : locale;
+      const start = campaign.indexOf(`  ${key}: {`);
+      const end = campaign.indexOf('\n  },', start);
+      const block = start >= 0 && end >= 0 ? campaign.slice(start, end) : undefined;
+      assert.ok(block, `missing campaign copy for ${locale}`);
+      assert.match(block, /DeepSeek V4 Pro/);
+      assert.match(block, /DeepSeek V4 Flash/);
+      assert.match(block, /headline:/);
+      assert.match(block, /body:/);
+    }
     assert.doesNotMatch(campaign, /body: ['\"][^'\"]*20:00/);
     assert.match(campaign, /paidBenefitNote: '8月13日—8月27日 · 两周免费用'/);
     assert.match(campaign, /teamBenefitNote: '8月13日—8月27日 · 两周免费用'/);
@@ -172,6 +183,11 @@ describe("pricing contract", () => {
   it("aligns the highlighted campaign checkmark with the benefit list below", async () => {
     const page = await readFile(PRICING_PAGE_PATH, "utf8");
 
+    assert.match(
+      page,
+      /\.pr-campaign-model-benefit > div\s*\{[\s\S]*display:\s*grid;[\s\S]*gap:\s*2px;/,
+      "the campaign date note must render on its own line below the model benefit",
+    );
     assert.match(page, /\.pr-campaign-model-benefit::before\s*\{\s*left:\s*8px;\s*\}/);
     assert.match(
       page,
@@ -182,6 +198,47 @@ describe("pricing contract", () => {
       page,
       /\.pr-team-feature-list li\.pr-campaign-model-benefit::before\s*\{[\s\S]*left:\s*8px;[\s\S]*top:\s*18px;[\s\S]*transform:\s*translateY\(-50%\);/,
       "the team campaign checkmark must override the later base list rule",
+    );
+  });
+
+  it("keeps the multimodal coming-soon note above the video label", async () => {
+    const page = await readFile(PRICING_PAGE_PATH, "utf8");
+
+    assert.match(
+      page,
+      /<span class="pr-mode-copy">\s*<small>\{comingSoonLabel\}<\/small>\s*<strong>\{L\.videoGeneration\}<\/strong>/,
+    );
+    assert.match(
+      page,
+      /<span class="pr-mode-copy">\s*<small aria-hidden="true"><\/small>\s*<strong>\{L\.imageGeneration\}<\/strong>/,
+      "image and video labels must share the same copy grid",
+    );
+    assert.match(
+      page,
+      /<span class="pr-mode-copy">\s*<small aria-hidden="true"><\/small>\s*<strong>\{L\.designAgent\}<\/strong>/,
+      "design and video labels must share the same reserved note row",
+    );
+    assert.match(
+      page,
+      /\.pr-mode-copy\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-rows:\s*0\.82rem auto;[\s\S]*gap:\s*4px;/,
+    );
+    assert.match(page, /\.pr-mode-copy strong\s*\{\s*grid-row:\s*2;/);
+    assert.match(page, /\.pr-mode-copy small:empty\s*\{\s*visibility:\s*hidden;/);
+    assert.doesNotMatch(page, /\{L\.videoGeneration\}<span class="pr-soon-tag">/);
+  });
+
+  it("renders exactly one Open Design Cloud capability section", async () => {
+    const page = await readFile(PRICING_PAGE_PATH, "utf8");
+
+    assert.doesNotMatch(
+      page,
+      /data-pricing-cloud-capability/,
+      "the superseded duplicate capability block must stay removed",
+    );
+    assert.equal(
+      page.match(/<section class="pr-multimodal"/g)?.length,
+      1,
+      "the retained Cloud capability section must render exactly once",
     );
   });
 
