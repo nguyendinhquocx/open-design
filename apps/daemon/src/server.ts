@@ -928,6 +928,7 @@ import {
 } from './collab/proactive-content-pull.js';
 import {
   backgroundPullMaxEntriesFromEnv,
+  backgroundPullMaxCumulativeEntriesFromEnv,
   createBackgroundPullSizeGuard,
 } from './collab/background-pull-size-guard.js';
 import {
@@ -4301,16 +4302,6 @@ export async function startServer({
       scope,
     );
   };
-  const teamProjectsForRequest = async (
-    context: WorkspaceCollabContext,
-  ): Promise<TeamProject[]> =>
-    withoutLocallyUnsharedProjects(
-      await teamProjectsLister(context.workspaceId),
-      {
-        workspaceId: context.workspaceId,
-        workspaceMemberId: context.workspaceMemberId,
-      },
-    );
   /**
    * Non-destructive quarantine marker for a pulled Team mirror. The binding
    * state is the central data-plane gate; the project metadata marker also
@@ -5041,6 +5032,7 @@ export async function startServer({
   // behavior. See collab/background-pull-size-guard.ts.
   const backgroundPullSizeGuard = createBackgroundPullSizeGuard({
     maxEntries: backgroundPullMaxEntriesFromEnv(),
+    maxCumulativeEntries: backgroundPullMaxCumulativeEntriesFromEnv(),
     inspect: (scope, version) =>
       inspectAuthorizedTeamProjectPull({
         projectId: scope.projectId,
@@ -5054,7 +5046,7 @@ export async function startServer({
       }),
     onDeferred: (info) => {
       console.info(
-        '[od] background shared-project pull deferred (oversized): ' +
+        `[od] background shared-project pull deferred (${info.reason}): ` +
           `projectId=${info.projectId} workspaceId=${info.workspaceId} ` +
           `version=${info.version} entries=${info.entryCount} ` +
           `maxEntries=${info.maxEntries}; opening the project pulls it on demand`,
@@ -5219,12 +5211,23 @@ export async function startServer({
         );
         return;
       }
+      // `candidates` counts projects CONSIDERED, which is not what the
+      // background lanes cost a member: a sweep with candidates=25 says
+      // nothing about whether 25 files or 25,000 landed on their disk. The
+      // `process*` fields below are this daemon process's running totals (not
+      // this sweep's), and they are the reading that makes
+      // OD_COLLAB_BACKGROUND_PULL_MAX_CUMULATIVE_ENTRIES choosable from a
+      // diagnostics bundle instead of from a synthetic workspace.
+      const backgroundVolume = backgroundPullSizeGuard.volume();
       console.info(
         `[od] shared-project content catch-up completed mode=${event.mode} lane=${event.lane} ` +
           `workspaceId=${event.workspaceId ?? 'unknown'} scanned=${event.scanned ?? 0} ` +
           `candidates=${event.candidates ?? 0} headChecks=${event.headChecks ?? 0} ` +
           `heads=${event.heads ?? 0} ` +
-          `suppressed=${event.suppressed ?? 0} complete=${event.complete === true}`,
+          `suppressed=${event.suppressed ?? 0} complete=${event.complete === true} ` +
+          `processEntries=${backgroundVolume.entries} ` +
+          `processProjects=${backgroundVolume.countedProjects} ` +
+          `processUncounted=${backgroundVolume.uncountedProjects}`,
       );
     },
   });
@@ -5430,7 +5433,29 @@ export async function startServer({
     // request and re-ran the one-off `vela team-projects --help` capability
     // probe — an extra CLI spawn (and, on the current CLI, a blocking analytics
     // POST) on every workspace projects load.
-    listTeamProjects: teamProjectsForRequest,
+    //
+    // Use the DISPLAY cache, not the uncached exact lookup. This is the read
+    // behind the Home team-project grid and the deep-link "is this shared to my
+    // team?" check, and `teamProjectsDisplayCache` was built for exactly this
+    // route — see its doc comment, which names it. Wired to the uncached lister
+    // instead, every call spawned `vela team-projects list`: measured at ~1.1s
+    // per request against a live workspace, cold and warm alike, on a path the
+    // UI hits on every launch and every deep link.
+    //
+    // These routes are display reads: the Home team-project grid and the
+    // deep-link "is this shared to my team?" check. Nothing here gates data
+    // access — the pull gate and the comment/presence relays reach
+    // `teamProjectsLister` on their own and still observe an unshare
+    // immediately.
+    //
+    // Display freshness does not rest on the 3s TTL alone: share, unshare and
+    // workspace-change invalidate this cache explicitly, via
+    // `invalidateTeamProjectCatalog` (collab-sync and the project routes) and
+    // the per-scope invalidations beside the cache itself.
+    //
+    // This was the last caller of the uncached `teamProjectsForRequest`
+    // wrapper, so that helper is removed with it rather than left orphaned.
+    listTeamProjects: teamProjectsForDisplay,
     // Expose the collab-cloud member directory so the web client can resolve
     // comment authors + owner names to a name + role.
     ...(teamMembersCache ? { listMembers: teamMembersForDisplay } : {}),
@@ -11755,16 +11780,12 @@ export async function startServer({
       // the CAPTURED pgid — the SIGKILL escalation is bound to it, so it can
       // never hit the next attempt's group (the cross-generation kill fixed in
       // #5202). On win32 / no pgid, fall back to signalling the direct child.
-      const reaped = design.runs.reapProcessGroup(priorProcessGroupId);
-      if (
-        !reaped &&
-        priorChild &&
-        typeof priorChild.kill === 'function' &&
-        priorChild.exitCode === null &&
-        !priorChild.killed
-      ) {
-        try { priorChild.kill('SIGTERM'); } catch {}
-      }
+      const termination = design.runs.terminateProcessTree(
+        run,
+        priorChild,
+        priorProcessGroupId,
+        { reason: 'retry_generation_replaced' },
+      );
       run.status = 'queued';
       run.updatedAt = Date.now();
       run.child = null;
@@ -11793,6 +11814,7 @@ export async function startServer({
         ...run.analyticsTelemetry,
         startRequestedAt: run.analyticsTelemetry?.startRequestedAt ?? run.createdAt,
       };
+      return termination;
     };
     const spawnRetryAttempt = (retryChatBody = chatBody) => {
       void startChatRun(retryChatBody, run).catch((err) => {
@@ -11818,16 +11840,31 @@ export async function startServer({
     // and finalizes the queued run, and the callback re-checks cancel/terminal
     // state in case it fires first.
     const scheduleRetryRestart = (delayMs, retryChatBody = chatBody) => {
-      tearDownAttemptForRetry();
+      const termination = tearDownAttemptForRetry();
       const wait = Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 0;
+      const spawnWhenQuiescent = () => {
+        void Promise.resolve(termination).then((result) => {
+          if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
+          if (!result?.quiescent) {
+            send('error', createSseErrorPayload(
+              'AGENT_EXECUTION_FAILED',
+              'The previous agent process tree could not be terminated; the retry was stopped before another model request was started.',
+              { retryable: false },
+            ));
+            finishWithRetryDecision('failed', 1, null, { allowRetry: false });
+            return;
+          }
+          spawnRetryAttempt(retryChatBody);
+        });
+      };
       if (wait <= 0) {
-        spawnRetryAttempt(retryChatBody);
+        spawnWhenQuiescent();
         return;
       }
       run.retryRestartTimer = setTimeout(() => {
         run.retryRestartTimer = null;
         if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
-        spawnRetryAttempt(retryChatBody);
+        spawnWhenQuiescent();
       }, wait);
     };
     const finalizeRetryTelemetry = (status, decision, failure, errorCode) => {
@@ -11912,7 +11949,12 @@ export async function startServer({
       const finished = finishRun(status, code, signal);
       return finished;
     };
-    const finishWithRetryDecision = (status, code = null, signal = null) => {
+    const finishWithRetryDecision = (
+      status,
+      code = null,
+      signal = null,
+      { allowRetry = true } = {},
+    ) => {
       lifecycle.mark('finalize_start');
       flushRunMessageEvents(run);
       // Persist the transport-level close mechanism before classifying this
@@ -11989,6 +12031,7 @@ export async function startServer({
         hasNativeSession: !!run.conversationId && !!liveSessionId,
       });
       if (
+        allowRetry &&
         postToolResumeDecision?.shouldRetry &&
         !design.runs.isTerminal(run.status) &&
         run.conversationId &&
@@ -12045,7 +12088,7 @@ export async function startServer({
         attemptCount: run.retryAttemptCount ?? 0,
         sideEffects,
       });
-      if (decision.shouldRetry && !design.runs.isTerminal(run.status)) {
+      if (allowRetry && decision.shouldRetry && !design.runs.isTerminal(run.status)) {
         run.retryOriginalFailure ??= failure ?? undefined;
         if ((run.retryAttemptCount ?? 0) === 0) {
           run.retryOriginFailure = failure ? { ...failure } : null;
@@ -12878,6 +12921,25 @@ export async function startServer({
       }
     };
     let forcedChildShutdownTimers = [];
+    let acpAttemptTermination = null;
+    const beginAcpAttemptTermination = (
+      reason = 'acp_terminal',
+      { gracefulWaitMs = 0 } = {},
+    ) => {
+      if (acpAttemptTermination) return acpAttemptTermination;
+      acpAttemptTermination = design.runs.terminateProcessTree(
+        run,
+        child,
+        run.processGroupId,
+        {
+          gracefulWaitMs,
+          termGraceMs: inactivityKillGraceMs,
+          killGraceMs: inactivityKillGraceMs,
+          reason,
+        },
+      );
+      return acpAttemptTermination;
+    };
     const clearForcedChildShutdown = () => {
       for (const timer of forcedChildShutdownTimers) clearTimeout(timer);
       forcedChildShutdownTimers = [];
@@ -12922,10 +12984,15 @@ export async function startServer({
         // only signals from this watchdog branch should be.
         artifactQuietShutdownRequested = true;
         if (acpSession?.abort) {
+          beginAcpAttemptTermination(
+            'acp_artifact_quiet_timeout',
+            { gracefulWaitMs: 100 },
+          );
           acpSession.abort();
+        } else {
+          if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
+          scheduleForcedChildShutdown();
         }
-        if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
-        scheduleForcedChildShutdown();
         return;
       }
       // OpenCode retries a 429 usage-limit silently and emits nothing on
@@ -12967,6 +13034,13 @@ export async function startServer({
         ? 'first_output_deadline'
         : 'inactivity_watchdog';
       send('error', stallPayload);
+      if (acpSession?.abort) {
+        beginAcpAttemptTermination(
+          `acp_${reason}_timeout`,
+          { gracefulWaitMs: 100 },
+        );
+        acpSession.abort();
+      }
       // A silent first-token hang is one of the safe transient failure shapes
       // this run is allowed to recover: classifyRunFailure maps the stall text
       // to a retryable `timeout` at `first_token_wait`, and decideSafeRunRetry
@@ -12978,11 +13052,10 @@ export async function startServer({
       if (retried) {
         watchdogRetryRestarted = true;
       }
-      if (acpSession?.abort) {
-        acpSession.abort();
+      if (!acpSession?.abort) {
+        if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
+        scheduleForcedChildShutdown();
       }
-      if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
-      scheduleForcedChildShutdown();
     };
     const armFirstOutputWatchdog = () => {
       if (firstOutputSeen || firstOutputTimer || firstOutputTimeoutMs <= 0) return;
@@ -13038,27 +13111,23 @@ export async function startServer({
       progressClockFrozen = true;
     };
     /**
-     * The ACP bridge has reached a terminal verdict for this attempt: it has
-     * already emitted the error and SIGTERMed the child. Hand the attempt over
-     * to the close handler under THAT verdict.
+     * The ACP bridge has reached a terminal verdict for this attempt. Hand the
+     * attempt over to the close handler under THAT verdict while the
+     * generation-bound process-tree terminator owns teardown.
      *
-     * Retiring the outer chat inactivity watchdog is the point. `fail()` issues
-     * one direct SIGTERM and nothing escalates it, while the outer watchdog is
-     * still armed from the agent's last real output — so a child that lingers
-     * past that ceiling lets `failForInactivity` fire on a run it does not yet
-     * consider terminal, overwrite `terminal_trigger` with `inactivity_watchdog`,
-     * and emit a second failure. The stall then reads as the wrong clock, which
-     * is the confusion `acp_stage_timeout` exists to remove.
+     * Retiring the outer chat inactivity watchdog is the point. Without that
+     * ownership transfer, a child that lingers past the ceiling lets
+     * `failForInactivity` overwrite `terminal_trigger` with
+     * `inactivity_watchdog` and emit a second failure.
      *
-     * Escalating the teardown is the other half: without it, retiring the
-     * watchdog would leave a SIGTERM-ignoring child with nothing to reap it.
-     * `scheduleForcedChildShutdown` captures this attempt's child, so a retry
-     * that swaps `run.child` inside the grace window is not affected.
+     * The terminator captures this attempt's child and process group, waits for
+     * quiescence, and escalates without ever consulting a retry's replacement
+     * `run.child`.
      */
     const retireAttemptOnAcpVerdict = () => {
       freezeProgressClock();
       clearInactivityWatchdog();
-      scheduleForcedChildShutdown();
+      beginAcpAttemptTermination('acp_verdict');
     };
     const noteAgentActivity = () => {
       // Once this attempt has a terminal verdict, nothing the child says may
@@ -14378,6 +14447,10 @@ export async function startServer({
         onCliReady: () => noteCliReadyAt(),
         onSessionInit: () => noteSessionInitDoneAt(),
         onPromptComplete: () => clearFirstOutputWatchdog(),
+        onTerminal: (kind) => beginAcpAttemptTermination(
+          `acp_${kind}`,
+          { gracefulWaitMs: kind === 'completed' ? 500 : 0 },
+        ),
         send: (event, data, meta) => {
           if (event === 'error') {
             clearFirstOutputWatchdog();
@@ -14679,7 +14752,9 @@ export async function startServer({
       revokeToolToken('child_exit');
       if (!attemptStillOwnsRun()) return;
       unregisterChatAgentEventSink();
+      if (run.pendingTerminalFinish) return;
       if (finishCanceledIfRequested(1, null)) return;
+      if (acpSession) beginAcpAttemptTermination('acp_child_error');
       send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', err.message));
       finishWithRetryDecision('failed', 1, null);
     });
@@ -14700,6 +14775,8 @@ export async function startServer({
       }
       revokeToolToken('child_exit');
       unregisterChatAgentEventSink();
+      if (run.pendingTerminalFinish) return;
+      if (acpSession) beginAcpAttemptTermination('acp_child_close');
       if (
         def.id === 'codex' &&
         strategyTaskAtStart &&
@@ -14923,7 +15000,7 @@ export async function startServer({
         markRpcCloseReason('empty_output');
         send('error', createSseErrorPayload(
           'AGENT_EXECUTION_FAILED',
-          'Agent completed without producing any output. The model or provider may have returned an empty response. Check the agent logs for upstream errors, then try re-authenticating the agent, checking quota, or switching models.',
+          'Agent completed without producing any output. The model or provider may have returned an empty response. Check the agent logs for upstream errors, then try re-authenticating the agent or switching models.',
           { retryable: true },
         ));
         return finishWithRetryDecision('failed', code, signal);
