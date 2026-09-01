@@ -62,11 +62,13 @@ import {
   collectStdoutTailSummary,
   summarizeRunDiagnosticsForAnalytics,
 } from './run-diagnostics.js';
+import { projectToolExecutionLifecycleDiagnostic } from './agent-protocol/acp/tool-execution-lifecycle.js';
 import {
   classifyRunFailure,
   type RunFailureClassification,
 } from './run-failure-classification.js';
 import { deriveRunErrorCode, runResultFromStatus } from './run-result.js';
+import { runAdmissionEvidenceForRun } from './runtimes/run-lifecycle-analytics.js';
 import { buildTraceObjectManifests } from './trace-object-manifest.js';
 import type { TraceArtifactObjectSource, TraceObjectUploadManifests } from './trace-object-manifest.js';
 import { getDetectedRuntimeVersions } from './runtimes/detection.js';
@@ -601,6 +603,10 @@ function collectAgentEvents(
         typeof data.name === 'string' && data.name.length > 0
           ? data.name
           : 'runtime_diagnostic';
+      const toolExecutionLifecycle = diagnosticName === 'tool_execution_lifecycle'
+        ? projectToolExecutionLifecycleDiagnostic(data)
+        : null;
+      if (diagnosticName === 'tool_execution_lifecycle' && !toolExecutionLifecycle) continue;
       const index = diagnosticCounts.get(diagnosticName) ?? 0;
       diagnosticCounts.set(diagnosticName, index + 1);
       out.push({
@@ -608,7 +614,7 @@ function collectAgentEvents(
         name: `agent-diagnostic:${diagnosticName}`,
         timestamp,
         input: eventInput('diagnostic'),
-        output: {
+        output: toolExecutionLifecycle ?? {
           name: diagnosticName,
           ...(typeof data.source === 'string' ? { source: data.source } : {}),
           ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
@@ -1065,6 +1071,7 @@ export async function buildSafeRunQualityProjectionFromDaemon(
     cancelOrigin: run.cancelOrigin ?? null,
     terminalTrigger: run.terminalTrigger ?? null,
     events: run.events,
+    admissionEvidence: runAdmissionEvidenceForRun(run),
   });
   // Terminal process evidence. The single-Run trace reported the stderr and
   // stdout tails only for a non-succeeded Run, and always reported the derived
@@ -1185,6 +1192,7 @@ export async function reportRunCompletedFromDaemon(
       cancelOrigin: run.cancelOrigin ?? null,
       terminalTrigger: run.terminalTrigger ?? null,
       events: run.events,
+      admissionEvidence: runAdmissionEvidenceForRun(run),
     });
     const timings = summarizeRunTimingAnalytics({
       runCreatedAt: run.createdAt,
