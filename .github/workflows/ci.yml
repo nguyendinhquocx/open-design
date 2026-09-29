@@ -48,9 +48,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # The workspace postinstall plan builds the daemon and its package
-      # dependency closure. Desktop and Web sidecar declarations remain explicit
-      # because those app outputs are outside the postinstall target catalog.
+      # `scripts/postinstall.mjs` only prebuilds package/tool entrypoints that
+      # are needed immediately after install for linked bins and shared
+      # sidecar/platform imports. It intentionally skips app outputs because
+      # building all apps would make every install run a Next/Electron-adjacent
+      # app build, even when a developer only needs packages/tools.
       #
       # Fresh CI typecheck/test still need these specific generated declarations:
       #   - `apps/daemon/dist/*.d.ts` for e2e runtime-adapter tests that import
@@ -63,6 +65,7 @@ jobs:
       # three exports without broad app builds, this CI prebuild can be removed.
       - name: Prebuild workspace type declarations
         run: |
+          pnpm --filter @open-design/daemon build
           pnpm --filter @open-design/desktop build
           pnpm --filter @open-design/web build:sidecar
 
