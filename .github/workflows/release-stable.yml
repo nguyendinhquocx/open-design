@@ -293,6 +293,15 @@ jobs:
           name: open-design-stable-win-release-assets
           path: ${{ runner.temp }}/release-assets
 
+      # Cache persistence is optional and runs outside this release workflow.
+      - name: Defer Windows tools-pack cache save
+        if: ${{ success() && (steps.win_tools_pack_cache_restore.outputs.cache-hit != 'true' || steps.win_tools_pack_build.outputs.cache_failed == 'true') }}
+        continue-on-error: true
+        uses: ./.github/actions/defer-pack-cache
+        with:
+          key: ${{ steps.win_tools_pack_cache_key.outputs.key }}
+          prefix: ${{ steps.win_tools_pack_cache_key.outputs.prefix }}
+
   build_linux:
     name: Build stable linux x64
     needs: [metadata, verify]
